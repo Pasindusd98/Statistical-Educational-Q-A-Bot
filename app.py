@@ -1,31 +1,123 @@
-import pandas as pd
-from sentence_transformers import SentenceTransformer, util
-import gradio as gr
+import os
+import faiss
+import pickle
+import numpy as np
+import streamlit as st
 
-# Load the CSV file with 300 Q&A pairs
-qa_df = pd.read_csv("statistics_qa_300.csv")
+from openai import OpenAI
+from sentence_transformers import SentenceTransformer
+from dotenv import load_dotenv
 
-# sentence embeddings
-model = SentenceTransformer("all-MiniLM-L6-v2")
+load_dotenv()
 
-# Precompute embeddings for all questions in the CSV
-qa_df["embedding"] = qa_df["question"].apply(lambda q: model.encode(q, convert_to_tensor=True))
-
-# Function to find the most similar question and return its answer
-def get_answer(user_input):
-    user_embedding = model.encode(user_input, convert_to_tensor=True)
-    similarities = qa_df["embedding"].apply(lambda emb: float(util.pytorch_cos_sim(emb, user_embedding)))
-    best_match = qa_df.loc[similarities.idxmax()]
-    return best_match["answer"]
-
-# Gradio UI
-iface = gr.Interface(
-    fn=get_answer,
-    inputs=gr.Textbox(lines=2, placeholder="Ask a statistics question..."),
-    outputs="text",
-    title="📊 Statistics Q&A Chatbot",
-    description="Ask me anything about statistics! (e.g., What is standard deviation?)",
-    allow_flagging="never"
+client = OpenAI(
+    api_key=os.getenv("OPENAI_API_KEY")
 )
 
-iface.launch()
+model = SentenceTransformer(
+    "all-MiniLM-L6-v2"
+)
+
+index = faiss.read_index(
+    "faiss_index/statistics.index"
+)
+
+with open(
+    "faiss_index/texts.pkl",
+    "rb"
+) as f:
+    documents = pickle.load(f)
+
+SIMILARITY_THRESHOLD = 1.0
+
+def retrieve_context(question):
+
+    embedding = model.encode(
+        [question]
+    )
+
+    distances, indices = index.search(
+        np.array(embedding),
+        k=3
+    )
+
+    results = []
+
+    for d, idx in zip(
+        distances[0],
+        indices[0]
+    ):
+        if d < SIMILARITY_THRESHOLD:
+            results.append(
+                documents[idx]
+            )
+
+    return results
+
+def chatbot(question):
+
+    contexts = retrieve_context(
+        question
+    )
+
+    if contexts:
+
+        context_text = "\n\n".join(
+            contexts
+        )
+
+        prompt = f"""
+You are a statistics tutor.
+
+Use the provided context.
+
+Context:
+{context_text}
+
+Question:
+{question}
+"""
+
+    else:
+
+        prompt = f"""
+You are a statistics tutor.
+
+Answer the question using your
+own knowledge.
+
+Question:
+{question}
+"""
+
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {
+                "role":"system",
+                "content":"You are an expert statistics educator."
+            },
+            {
+                "role":"user",
+                "content":prompt
+            }
+        ]
+    )
+
+    return response.choices[0].message.content
+
+st.title(
+    "📊 Advanced Statistics AI Chatbot"
+)
+
+question = st.text_input(
+    "Ask anything about statistics"
+)
+
+if question:
+
+    answer = chatbot(
+        question
+    )
+
+    st.write(answer)
